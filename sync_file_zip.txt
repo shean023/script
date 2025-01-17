@@ -1,0 +1,106 @@
+import zipfile
+import os
+from fabric import Connection
+
+# 设置目标文件夹和压缩文件名
+source_folder = '/var/lib/jenkins/workspace/'  # 要压缩的文件夹路径
+zip_filename = 'front-client.zip'      # 压缩后的文件名
+
+# 设置要解压的目标目录
+target_directory = '/usr/nginx/html/'
+
+# 设置私钥文件路径
+private_key_path = 'id_rsa'  # 请确保路径指向你的私钥文件
+
+# 读取主机列表
+def parse_host_info(host_str):
+    """解析用户名、主机IP和端口"""
+    try:
+        user_host, port = host_str.split(':')
+        username, host = user_host.split('@')
+        port = int(port) if port else 22  # 默认端口是 22
+        return username, host, port
+    except ValueError:
+        raise ValueError(f"Host string '{host_str}' is not in the correct format.")
+
+def read_host_file(host_file):
+    """读取主机列表并返回"""
+    try:
+        with open(host_file, 'r') as f:
+            return [line.split('#')[0].strip() for line in f.readlines() if line.strip() and not line.strip().startswith('#')]
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Host file '{host_file}' not found.")
+    except Exception as e:
+        raise Exception(f"Error reading host file '{host_file}': {e}")
+
+# 将目标文件夹压缩成 zip 文件
+def compress_folder(source_folder, zip_filename):
+    try:
+        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(source_folder):
+                for file in files:
+                    zipf.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), source_folder))
+        print(f"Successfully compressed folder '{source_folder}' into '{zip_filename}'.")
+    except Exception as e:
+        raise Exception(f"Error compressing folder '{source_folder}': {e}")
+
+# 上传文件并解压
+def upload_and_extract_to_host(username, host, port, zip_filename, target_directory):
+    try:
+        # 创建使用私钥连接的连接对象
+        conn = Connection(
+            host,
+            user=username,
+            port=port,
+            connect_kwargs={
+                "key_filename": private_key_path  # 使用私钥文件进行连接
+            }
+        )
+
+        # 上传文件
+        conn.put(zip_filename, '/tmp/' + zip_filename)
+
+        # 执行解压命令，并合并为一个命令
+        combined_command = f"""
+        mkdir -p {target_directory} &&
+        unzip -o /tmp/{zip_filename} -d {target_directory} &&
+        chown -R www.www {target_directory} &&
+        rm -rf {target_directory}/.git &&
+        cd {target_directory} &&
+        pwd &&
+        /usr/local/php/bin/php /usr/local/bin/composer install
+        """
+
+        # 执行合并命令
+        conn.run(combined_command)
+
+        print(f"Successfully uploaded and extracted on {host}.")
+    
+    except Exception as e:
+        print(f"Failed to upload or extract on {host}: {e}")
+
+def main():
+    # 压缩文件
+    try:
+        compress_folder(source_folder, zip_filename)
+    except Exception as e:
+        print(f"Compression failed: {e}")
+        return
+
+    # 读取并处理主机列表
+    try:
+        hosts = read_host_file('hosts.txt')
+    except Exception as e:
+        print(f"Error reading hosts file: {e}")
+        return
+
+    # 遍历主机列表，上传并解压
+    for host_str in hosts:
+        try:
+            username, host, port = parse_host_info(host_str)
+            upload_and_extract_to_host(username, host, port, zip_filename, target_directory)
+        except Exception as e:
+            print(f"Failed for host '{host_str}': {e}")
+
+if __name__ == "__main__":
+    main()
